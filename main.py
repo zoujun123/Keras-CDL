@@ -8,9 +8,9 @@ def main():
     num_user = int(train_mat[:,0].max()) + 1
     num_item_feat = item_mat.shape[1]
 
-    model = CollaborativeDeepLearning(num_user, num_item_feat, 8)
+    model = CollaborativeDeepLearning(num_user, num_item_feat, hidden_dim=10, latent_dim=8)
     model.pretrain(item_mat)
-    model.fineture(train_mat, test_mat, item_mat)
+    model.fineture(train_mat, test_mat, item_mat, reg=0.000000001)
 
 if __name__ == "__main__":
     main()

@@ -11,11 +11,11 @@ from keras import backend as K
 
 
 class CollaborativeDeepLearning:
-    def __init__(self, num_user, num_item_feat, k=8):
+    def __init__(self, num_user, num_item_feat, hidden_dim, latent_dim=8):
         self.num_user = num_user
         self.input_dim = num_item_feat
-        self.embedding_dim = k
-        self.nb_hidden_layers = [num_item_feat, int(num_item_feat/2), k]
+        self.embedding_dim = latent_dim
+        self.nb_hidden_layers = [num_item_feat, hidden_dim, latent_dim]
         
     def pretrain(self, X_train, encoder_noise=0.1, dropout_rate=0.1, act_fun='sigmoid', batch_size=64, nb_epoch=10): # Layer-wise pre-training
         '''
@@ -48,7 +48,9 @@ class CollaborativeDeepLearning:
             X_train_tmp = ae_encoder.predict(X_train_tmp)
 
     def fineture(self, train_mat, test_mat, item_mat, lr=0.1, reg=0.1, epochs=10, batch_size=64):
-        # Fine-tuning
+        '''
+        Fine-tuning with ratings
+        '''
         item_input = Input(shape=(self.input_dim,))
 
         encoded = self.trained_encoders[0](item_input)
@@ -57,16 +59,15 @@ class CollaborativeDeepLearning:
         decoded = self.trained_decoders[1](encoded)
         decoded = self.trained_decoders[0](decoded)
 
-
         userInputLayer = Input(shape=(1,), dtype="int32")
-        userEmbeddingLayer = Embedding(input_dim=self.num_user, output_dim=self.embedding_dim, input_length=1, embeddings_regularizer=l2(0.), embeddings_initializer=RandomUniform(minval=0, maxval=1))(userInputLayer)
+        userEmbeddingLayer = Embedding(input_dim=self.num_user, output_dim=self.embedding_dim, input_length=1, embeddings_regularizer=l2(reg), embeddings_initializer=RandomUniform(minval=0, maxval=1))(userInputLayer)
         userEmbeddingLayer = Flatten()(userEmbeddingLayer)
 
         dotLayer = Dot(axes = -1)([userEmbeddingLayer, encoded])
         cdl = Model(inputs=[userInputLayer, item_input], outputs=dotLayer)
 
         sgd = optimizers.SGD(lr=lr, decay=0, momentum=0.9, nesterov=False)
-        cdl.compile(optimizer=sgd, loss='mse')
+        cdl.compile(optimizer=sgd, loss='adam')
 
         train_user, train_item_feat, train_label = self.mat2input(train_mat, item_mat)
         test_user, test_item_feat, test_label = self.mat2input(test_mat, item_mat)
