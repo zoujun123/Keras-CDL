@@ -1,5 +1,5 @@
 # Keras-CDL
-Keras implement of Collaborative Deep Learning for Recommender Systems
+A simple version of Collaborative Deep Learning in Keras (no autoencoder loss)
 
 ```
 python main.py
