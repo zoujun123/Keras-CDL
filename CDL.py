@@ -1,4 +1,5 @@
 import numpy as np
+import logging
 from keras.layers import Input, Embedding, Dot, Flatten, Dense, Dropout
 from keras.layers.noise import GaussianNoise
 from keras.initializers import RandomUniform
@@ -7,30 +8,37 @@ from keras.regularizers import l2
 from keras import optimizers
 from keras import backend as K
 
-
 class CollaborativeDeepLearning:
-    def __init__(self, num_user, hidden_layers):
-        self.num_user = num_user
+    def __init__(self, item_mat, hidden_layers):
+        '''
+        hidden_layers = a list of three integer indicating the embedding dimension of autoencoder
+        item_mat = item feature matrix with shape (# of item, # of item features)
+        '''
+        self.item_mat = item_mat
         self.hidden_layers = hidden_layers
         self.item_dim = hidden_layers[0]
         self.embedding_dim = hidden_layers[-1]
         
-    def pretrain(self, X_train, encoder_noise=0.1, dropout_rate=0.1, activation='sigmoid', batch_size=64, nb_epoch=10):
+    def pretrain(self, lamda_w=0.1, encoder_noise=0.1, dropout_rate=0.1, activation='sigmoid', batch_size=32, epochs=10):
         '''
-        Layer-wise pre-training
-        X_train = item features matrix
+        layer-wise pretraining on item features (item_mat)
         '''
         self.trained_encoders = []
         self.trained_decoders = []
-        X_train_tmp = X_train
+        X_train = self.item_mat
+        first_layer = True
         for input_dim, hidden_dim in zip(self.hidden_layers[:-1], self.hidden_layers[1:]):
-            print('Pre-training the layer: Input dim {} -> Output dim {}'.format(input_dim, hidden_dim))
+            logging.info('Pretraining the layer: Input dim {} -> Output dim {}'.format(input_dim, hidden_dim))
             pretrain_input = Input(shape=(input_dim,))
-            encoded = GaussianNoise(stddev=encoder_noise)(pretrain_input)
-            encoded = Dropout(dropout_rate)(encoded)
-            encoder = Dense(hidden_dim, activation=activation)(encoded)
-            decoder = Dense(input_dim, activation=activation)(encoder)
-            # end to end ae
+            if first_layer: # get the corrupted input x_0 from the clean input x_c
+                first_layer = False
+                encoded = GaussianNoise(stddev=encoder_noise)(pretrain_input)
+                encoded = Dropout(dropout_rate)(encoded)
+            else:
+                encoded = Dropout(dropout_rate)(pretrain_input)
+            encoder = Dense(hidden_dim, activation=activation, kernel_regularizer=l2(lamda_w), bias_regularizer=l2(lamda_w))(encoded)
+            decoder = Dense(input_dim, activation=activation, kernel_regularizer=l2(lamda_w), bias_regularizer=l2(lamda_w))(encoder)
+            # end to end autoencoder
             ae = Model(inputs=pretrain_input, outputs=decoder)
             # encoder
             ae_encoder = Model(inputs=pretrain_input, outputs=encoder)
@@ -40,43 +48,56 @@ class CollaborativeDeepLearning:
             ae_decoder = Model(encoded_input, decoder_layer(encoded_input))
 
             ae.compile(loss='mse', optimizer='rmsprop')
-            ae.fit(X_train_tmp, X_train_tmp, batch_size=batch_size, epochs=nb_epoch)
+            ae.fit(X_train, X_train, batch_size=batch_size, epochs=epochs, verbose=2)
 
             self.trained_encoders.append(ae_encoder)
             self.trained_decoders.append(ae_decoder)
-            X_train_tmp = ae_encoder.predict(X_train_tmp)
+            X_train = ae_encoder.predict(X_train)
 
-    def fineture(self, train_mat, test_mat, item_mat, lr=0.1, reg=0.1, epochs=10, batch_size=64):
+    def fineture(self, train_mat, test_mat, lamda_u=0.1, lamda_v=0.1, lamda_n=0.1, lr=0.001, batch_size=64, epochs=10):
         '''
-        Fine-tuning with 
+        Fine-tuning with rating prediction
         '''
-        item_input = Input(shape=(self.item_dim,))
+        num_user = int( max(train_mat[:,0].max(), test_mat[:,0].max()) + 1 )
+        #num_user = int( train_mat[:,0].max() + 1 )
 
+        # item autoencoder 
+        item_input = Input(shape=(self.item_dim,), name='item_input')
         encoded = self.trained_encoders[0](item_input)
         encoded = self.trained_encoders[1](encoded)
-
         decoded = self.trained_decoders[1](encoded)
         decoded = self.trained_decoders[0](decoded)
 
-        userInputLayer = Input(shape=(1,), dtype='int32')
-        userEmbeddingLayer = Embedding(input_dim=self.num_user, output_dim=self.embedding_dim, input_length=1, embeddings_regularizer=l2(reg), embeddings_initializer=RandomUniform(minval=0, maxval=1))(userInputLayer)
+        # item embedding
+        itemEmbeddingLayer = GaussianNoise(stddev=lamda_v)(encoded)
+
+        # user embedding
+        userInputLayer = Input(shape=(1,), dtype='int32', name='user_input')
+        userEmbeddingLayer = Embedding(input_dim=num_user, output_dim=self.embedding_dim, input_length=1, embeddings_regularizer=l2(lamda_u), embeddings_initializer=RandomUniform(minval=0, maxval=1))(userInputLayer)
         userEmbeddingLayer = Flatten()(userEmbeddingLayer)
 
-        dotLayer = Dot(axes = -1)([userEmbeddingLayer, encoded])
-        cdl = Model(inputs=[userInputLayer, item_input], outputs=dotLayer)
+        # rating prediction
+        dotLayer = Dot(axes = -1, name='dot_layer')([userEmbeddingLayer, itemEmbeddingLayer])
 
-        # sgd = optimizers.SGD(lr=lr, decay=0, momentum=0.9, nesterov=False)
-        cdl.compile(optimizer='adam', loss='mse')
+        my_RMSprop = optimizers.RMSprop(lr=lr)
 
-        train_user, train_item_feat, train_label = self.matrix2input(train_mat, item_mat)
-        test_user, test_item_feat, test_label = self.matrix2input(test_mat, item_mat)
+        self.cdl_model = Model(inputs=[userInputLayer, item_input], outputs=[dotLayer, decoded])
+        self.cdl_model.compile(optimizer=my_RMSprop, loss=['mse', 'mse'], loss_weights=[1, lamda_n])
 
-        model_history = cdl.fit([train_user, train_item_feat], train_label, epochs=epochs, batch_size=batch_size, validation_data=([test_user, test_item_feat], test_label))
+        train_user, train_item_feat, train_label = self.matrix2input(train_mat)
+        test_user, test_item_feat, test_label = self.matrix2input(test_mat)
+
+        model_history = self.cdl_model.fit([train_user, train_item_feat], [train_label, train_item_feat], epochs=epochs, batch_size=batch_size, validation_data=([test_user, test_item_feat], [test_label, test_item_feat]))
         return model_history
 
-    def matrix2input(self, rating_mat, item_mat):
+    def matrix2input(self, rating_mat):
         train_user = rating_mat[:, 0].reshape(-1, 1).astype(int)
         train_item = rating_mat[:, 1].reshape(-1, 1).astype(int)
         train_label = rating_mat[:, 2].reshape(-1, 1)
-        train_item_feat = [item_mat[train_item[x]][0] for x in range(train_item.shape[0])]
+        train_item_feat = [self.item_mat[train_item[x]][0] for x in range(train_item.shape[0])]
         return train_user, np.array(train_item_feat), train_label
+    
+    def getRMSE(self, test_mat):
+        test_user, test_item_feat, test_label = self.matrix2input(test_mat)
+        pred_out = self.cdl_model.predict([test_user, test_item_feat])
+        return np.sqrt(np.mean(np.square(test_label.flatten() - pred_out[0].flatten())))
