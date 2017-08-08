@@ -1,5 +1,5 @@
 # Keras-CDL
-A simple version of Collaborative Deep Learning in Keras (no autoencoder loss)
+keras implementation of Collaborative Deep Learning
 
 ```
 python main.py
